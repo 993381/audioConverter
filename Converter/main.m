@@ -1,6 +1,6 @@
 #include <AudioToolbox/AudioToolbox.h>
 
-#define kInputFileLocation CFSTR("/Users/crivers/Desktop/Kyoto Bell.mp3")
+#define kInputFileLocation CFSTR("/Users/crivers/Desktop/scs.mp3")
 #define kOutputFileLocation CFSTR("/Users/crivers/Desktop/output.wav")
 
 #pragma mark user data struct
@@ -10,7 +10,6 @@ typedef struct MyAudioConverterSettings {
     AudioStreamBasicDescription outputFormat;
     
     AudioFileID inputFile;
-    AudioFileID outputFile;
     
     UInt64 inputFilePacketIndex;
     UInt64 inputFilePacketCount;
@@ -18,12 +17,12 @@ typedef struct MyAudioConverterSettings {
     AudioStreamPacketDescription *inputFilePacketDescriptions;
     
     void *sourceBuffer;
+    void *destination;
     
 } MyAudioConverterSettings;
 
-
 #pragma mark converter callback function
-OSStatus MyAudioConverterCallback(
+static OSStatus MyAudioConverterCallback(
                                   AudioConverterRef inAudioCOnverter,
                                   UInt32 *ioDataPacketCount,
                                   AudioBufferList *ioData,
@@ -50,17 +49,16 @@ OSStatus MyAudioConverterCallback(
         audioConverterSettings->sourceBuffer = NULL;
     }
     
-    audioConverterSettings->sourceBuffer = (void*)calloc(1, *ioDataPacketCount * audioConverterSettings->inputFilePacketMaxSize);
+    UInt32 outByteCount = *ioDataPacketCount * audioConverterSettings->inputFilePacketMaxSize;
+    audioConverterSettings->sourceBuffer = (void*)calloc(1, outByteCount);
     
-    UInt32 outByteCount = 0;
-    // TODO: Use AudioFileReadPacketData instead
-    OSStatus result = AudioFileReadPackets(audioConverterSettings->inputFile,
-                                           true,
-                                           &outByteCount,
-                                           audioConverterSettings->inputFilePacketDescriptions,
-                                           audioConverterSettings->inputFilePacketIndex,
-                                           ioDataPacketCount,
-                                           audioConverterSettings->sourceBuffer);
+    OSStatus result = AudioFileReadPacketData(audioConverterSettings->inputFile,
+                                              true,
+                                              &outByteCount,
+                                              audioConverterSettings->inputFilePacketDescriptions,
+                                              audioConverterSettings->inputFilePacketIndex,
+                                              ioDataPacketCount,
+                                              audioConverterSettings->sourceBuffer);
     
     if (result == eofErr && *ioDataPacketCount) {
         result = kAudioFileEndOfFileError;
@@ -82,12 +80,10 @@ OSStatus MyAudioConverterCallback(
 }
 
 #pragma mark utility functions
-// 4.2
-// 6.7-6.15
-void Convert(MyAudioConverterSettings *mySettings) {
+static void Convert(MyAudioConverterSettings *mySettings) {
     // Create the audio converter object
     AudioConverterRef audioConverter;
-    OSStatus err = AudioConverterNew(&mySettings->inputFormat, &mySettings->outputFormat, &audioConverter);
+    AudioConverterNew(&mySettings->inputFormat, &mySettings->outputFormat, &audioConverter);
     
     UInt32 packetsPerBuffer = 0;
     UInt32 outputBufferSize = 32 * 1024; // 32kb
@@ -119,7 +115,7 @@ void Convert(MyAudioConverterSettings *mySettings) {
     UInt8 *outputBUffer = (UInt8*)malloc(sizeof(UInt8) * outputBufferSize);
     
     // Start a loop to convert and write data
-    UInt32 outputFilePacketPosition = 0;
+    UInt32 outputBytePosition = 0;
     while(1) {
         // Prepare an AudioBufferList to receive converted data
         AudioBufferList convertedData;
@@ -141,21 +137,22 @@ void Convert(MyAudioConverterSettings *mySettings) {
             break;
         }
         
-        // Write the converted data to the output file
-        OSStatus err = AudioFileWritePackets(mySettings->outputFile, FALSE, ioOutputDataPackets, NULL, outputFilePacketPosition / mySettings->outputFormat.mBytesPerPacket, &ioOutputDataPackets, convertedData.mBuffers[0].mData);
-        outputFilePacketPosition += (ioOutputDataPackets * mySettings->outputFormat.mBytesPerPacket);
-        
-        printf("%d\n", (int)err);
+        // Write the converted data to the destination
+        char* outPtr = (char*)mySettings->destination;
+        memcpy(outPtr + outputBytePosition,
+               convertedData.mBuffers[0].mData,
+               convertedData.mBuffers[0].mDataByteSize);
+        outputBytePosition += convertedData.mBuffers[0].mDataByteSize;
+        printf("OPB: %llu\n", outputBytePosition);
     }
     
     AudioConverterDispose(audioConverter);
 }
 
-#pragma mark main function
-int main(int argc, const char *argv[]) {
-    
+void AudioFileLoad(CFURLRef inFileURL, AudioStreamBasicDescription outputFormat, void** inDest, UInt64* frameCount) {
     // Open input file
     MyAudioConverterSettings audioConverterSettings = {0};
+    audioConverterSettings.outputFormat = outputFormat;
     
     CFURLRef inputFileURL = CFURLCreateWithFileSystemPath(
                                                           kCFAllocatorDefault,
@@ -163,8 +160,7 @@ int main(int argc, const char *argv[]) {
                                                           kCFURLPOSIXPathStyle,
                                                           false);
     
-    OSStatus err = AudioFileOpenURL(inputFileURL, kAudioFileReadPermission, 0, &audioConverterSettings.inputFile);
-    CFRelease(inputFileURL);
+    AudioFileOpenURL(inputFileURL, kAudioFileReadPermission, 0, &audioConverterSettings.inputFile);
     
     // Get input format
     UInt32 propSize = sizeof(audioConverterSettings.inputFormat);
@@ -187,27 +183,51 @@ int main(int argc, const char *argv[]) {
                          &propSize,
                          &audioConverterSettings.inputFilePacketMaxSize);
     
-    audioConverterSettings.outputFormat.mSampleRate = 44100.0;
-    audioConverterSettings.outputFormat.mFormatID = kAudioFormatLinearPCM;
-    audioConverterSettings.outputFormat.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    AudioFramePacketTranslation audioFramePacketTranslation;
+    audioFramePacketTranslation.mPacket = audioConverterSettings.inputFilePacketCount;
+    propSize = sizeof(audioFramePacketTranslation);
+    AudioFileGetProperty(audioConverterSettings.inputFile, kAudioFilePropertyPacketToFrame, &propSize, &audioFramePacketTranslation);
     
-    audioConverterSettings.outputFormat.mBitsPerChannel = 32;
-    audioConverterSettings.outputFormat.mChannelsPerFrame = 1;
-    audioConverterSettings.outputFormat.mBytesPerFrame = 4;
+    UInt64 framesToAllocate = ceil(audioFramePacketTranslation.mFrame * (audioConverterSettings.outputFormat.mSampleRate / audioConverterSettings.inputFormat.mSampleRate));
+//    UInt64 bytesToAllocate = framesToAllocate * audioConverterSettings.outputFormat.mBytesPerPacket;
     
-    audioConverterSettings.outputFormat.mFramesPerPacket = 1;
-    audioConverterSettings.outputFormat.mBytesPerPacket = 4;
+    audioConverterSettings.destination = calloc(framesToAllocate, outputFormat.mBytesPerFrame);
+
     
-    CFURLRef outputFileURL = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, kOutputFileLocation, kCFURLPOSIXPathStyle, false);
-    err = AudioFileCreateWithURL(outputFileURL, kAudioFileWAVEType, &audioConverterSettings.outputFormat, kAudioFileFlags_EraseFile, &audioConverterSettings.outputFile);
-    CFRelease(outputFileURL);
-    
-    fprintf(stdout, "Converting...\n");
     Convert(&audioConverterSettings);
     
-cleanup:
     AudioFileClose(audioConverterSettings.inputFile);
-    AudioFileClose(audioConverterSettings.outputFile);
     
+    *inDest = audioConverterSettings.destination;
+    *frameCount = framesToAllocate;
+}
+
+#pragma mark main function
+int main(int argc, const char *argv[]) {
+    CFURLRef inputFileURL = CFURLCreateWithFileSystemPath(
+                                                          kCFAllocatorDefault,
+                                                          kInputFileLocation,
+                                                          kCFURLPOSIXPathStyle,
+                                                          false);
+    
+
+    AudioStreamBasicDescription outputFormat = { 0 };
+    outputFormat.mSampleRate = 44100;
+    outputFormat.mFormatID = kAudioFormatLinearPCM;
+    outputFormat.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    
+    outputFormat.mBitsPerChannel = 32;
+    outputFormat.mChannelsPerFrame = 1;
+    outputFormat.mBytesPerFrame = 4;
+    
+    outputFormat.mFramesPerPacket = 1;
+    outputFormat.mBytesPerPacket = 4;
+        
+    void* dest;
+    UInt64 frames;
+    AudioFileLoad(inputFileURL, outputFormat, &dest, &frames);
+    CFRelease(inputFileURL);
+    
+    printf("Convert & loaded %llu frames\n", frames);
     return 0;
 }
