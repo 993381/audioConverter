@@ -1,6 +1,6 @@
 #include <AudioToolbox/AudioToolbox.h>
 
-#define kInputFileLocation CFSTR("/Users/crivers/Desktop/scs.mp3")
+#define kInputFileLocation CFSTR("/Users/crivers/Desktop/Kyoto bell.mp3")
 #define kOutputFileLocation CFSTR("/Users/crivers/Desktop/output.wav")
 
 #pragma mark user data struct
@@ -49,10 +49,9 @@ static OSStatus MyAudioConverterCallback(
         audioConverterSettings->sourceBuffer = NULL;
     }
     
-    audioConverterSettings->sourceBuffer = (void*)calloc(1, *ioDataPacketCount * audioConverterSettings->inputFilePacketMaxSize);
+    UInt32 outByteCount = *ioDataPacketCount * audioConverterSettings->inputFilePacketMaxSize;
+    audioConverterSettings->sourceBuffer = (void*)calloc(1, outByteCount);
     
-    UInt32 outByteCount = 0;
-    // TODO: Use AudioFileReadPacketData instead
     OSStatus result = AudioFileReadPacketData(audioConverterSettings->inputFile,
                                               true,
                                               &outByteCount,
@@ -190,10 +189,10 @@ void AudioFileLoad(CFURLRef inFileURL, AudioStreamBasicDescription outputFormat,
     AudioFileGetProperty(audioConverterSettings.inputFile, kAudioFilePropertyPacketToFrame, &propSize, &audioFramePacketTranslation);
     
     UInt64 framesToAllocate = ceil(audioFramePacketTranslation.mFrame * (audioConverterSettings.outputFormat.mSampleRate / audioConverterSettings.inputFormat.mSampleRate));
-    UInt64 bytesToAllocate = framesToAllocate * audioConverterSettings.outputFormat.mBytesPerPacket;
+//    UInt64 bytesToAllocate = framesToAllocate * audioConverterSettings.outputFormat.mBytesPerPacket;
     
-    audioConverterSettings.destination = malloc(bytesToAllocate);
-    memset(audioConverterSettings.destination, 0, bytesToAllocate);
+    audioConverterSettings.destination = calloc(framesToAllocate, outputFormat.mBytesPerFrame);
+
     
     Convert(&audioConverterSettings);
     
@@ -213,7 +212,7 @@ int main(int argc, const char *argv[]) {
     
 
     AudioStreamBasicDescription outputFormat = { 0 };
-    outputFormat.mSampleRate = 48000;
+    outputFormat.mSampleRate = 44100;
     outputFormat.mFormatID = kAudioFormatLinearPCM;
     outputFormat.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
     
@@ -230,6 +229,11 @@ int main(int argc, const char *argv[]) {
     CFRelease(inputFileURL);
     
     printf("Convert & loaded %llu frames\n", frames);
+    
+    Float32* out = (Float32*)dest;
+    for (int i = 0; i < frames; i++) {
+        printf("%i: %f\n", i, out[i]);
+    }
     
     return 0;
 }
