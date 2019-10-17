@@ -1,6 +1,6 @@
 #include <AudioToolbox/AudioToolbox.h>
 
-#define kInputFileLocation CFSTR("/Users/crivers/Desktop/Kyoto bell.mp3")
+#define kInputFileLocation CFSTR("/Users/crivers/Desktop/scs.mp3")
 #define kOutputFileLocation CFSTR("/Users/crivers/Desktop/output.wav")
 
 #pragma mark user data struct
@@ -229,11 +229,5 @@ int main(int argc, const char *argv[]) {
     CFRelease(inputFileURL);
     
     printf("Convert & loaded %llu frames\n", frames);
-    
-    Float32* out = (Float32*)dest;
-    for (int i = 0; i < frames; i++) {
-        printf("%i: %f\n", i, out[i]);
-    }
-    
     return 0;
 }
